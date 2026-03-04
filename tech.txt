@@ -1,0 +1,20 @@
+
+Category	Technology
+Language	Python
+Deep Learning	PyTorch (LSTM neural network)
+Data Processing	Pandas, NumPy, PyArrow
+ML Utilities	scikit-learn, imbalanced-learn (for handling class imbalance)
+Visualization	Matplotlib, Seaborn
+Experiment Tracking	TensorBoard
+Serialization	Joblib
+Notebook	Jupyter (ipykernel, notebook)
+Progress Bars	tqdm
+Dataset	CIC-DDoS2019 / CICIDS-2017 (network traffic CSV)    
+Methodology	Train/Test Split, Cross-validation, Hyperparameter Tuning, Performance Metrics (Precision, Recall, F1-Score, ROC-AUC)
+, Model Evaluation, Confusion Matrix Analysis
+Workflow	Data Loading → Preprocessing → Feature Engineering → Train/Validation/Test Split → Model Training → Hyperparameter Tuning → Performance Evaluation → Model Deployment
+ → Inference & Monitoring
+Model Architecture	LSTM (Long Short-Term Memory) neural network for sequence modeling
+Hybrid Approach	LSTM + Dense layers for classification
+Alternative Methods	Bidirectional LSTM, Stacked LSTM, LSTM with Attention mechanism
+Baseline Models	Random Forest, Gradient Boosting (XGBoost) for comparison
