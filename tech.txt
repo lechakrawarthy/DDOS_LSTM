@@ -1,20 +1,270 @@
 
-Category	Technology
-Language	Python
-Deep Learning	PyTorch (LSTM neural network)
-Data Processing	Pandas, NumPy, PyArrow
-ML Utilities	scikit-learn, imbalanced-learn (for handling class imbalance)
-Visualization	Matplotlib, Seaborn
-Experiment Tracking	TensorBoard
-Serialization	Joblib
-Notebook	Jupyter (ipykernel, notebook)
-Progress Bars	tqdm
-Dataset	CIC-DDoS2019 / CICIDS-2017 (network traffic CSV)    
-Methodology	Train/Test Split, Cross-validation, Hyperparameter Tuning, Performance Metrics (Precision, Recall, F1-Score, ROC-AUC)
-, Model Evaluation, Confusion Matrix Analysis
-Workflow	Data Loading → Preprocessing → Feature Engineering → Train/Validation/Test Split → Model Training → Hyperparameter Tuning → Performance Evaluation → Model Deployment
- → Inference & Monitoring
-Model Architecture	LSTM (Long Short-Term Memory) neural network for sequence modeling
-Hybrid Approach	LSTM + Dense layers for classification
-Alternative Methods	Bidirectional LSTM, Stacked LSTM, LSTM with Attention mechanism
-Baseline Models	Random Forest, Gradient Boosting (XGBoost) for comparison
+================================================================================
+  DDoS ATTACK DETECTION USING LSTM-BASED NETWORK TRAFFIC ANALYSIS
+  Technical Reference Document
+================================================================================
+
+--------------------------------------------------------------------------------
+1. TITLE JUSTIFICATION
+--------------------------------------------------------------------------------
+
+Title : "DDoS Attack Detection Using LSTM-Based Network Traffic Analysis"
+
+Justification :
+
+  Distributed Denial-of-Service (DDoS) attacks remain one of the most
+  disruptive and economically damaging cyber threats. Attackers flood a target
+  host or network segment with artificially generated traffic, exhausting
+  bandwidth, CPU, and connection-table resources until legitimate users are
+  denied access.
+
+  Traditional intrusion detection systems (IDS) rely on hand-crafted signature
+  rules or shallow statistical thresholds. These approaches:
+    • Fail against novel or morphed attack variants.
+    • Require constant manual rule maintenance.
+    • Cannot model the temporal dynamics of a flow burst.
+
+  Network traffic is inherently sequential — each flow follows another in time,
+  and attack patterns manifest as anomalous *sequences* of flows rather than
+  isolated packets. Long Short-Term Memory (LSTM) networks are specifically
+  designed to learn patterns over time-ordered sequences, making them a natural
+  architectural match for this problem.
+
+  The "LSTM-Based" qualifier in the title is therefore technically precise:
+  the model ingests sliding windows of consecutive flow records and classifies
+  whether the sequence represents a DDoS burst or benign traffic, leveraging
+  temporal dependencies that static classifiers cannot capture.
+
+--------------------------------------------------------------------------------
+2. EXISTING SYSTEM
+--------------------------------------------------------------------------------
+
+  Current production-grade DDoS detection systems broadly fall into three
+  categories:
+
+  a) Signature / Rule-Based IDS (e.g., Snort, Suricata)
+     - Maintain a database of known attack patterns.
+     - Generate alerts when packet headers or payloads match rules.
+     LIMITATIONS : Zero-day attacks evade detection; rules require continuous
+     manual updates; high false-positive rates under legitimate traffic spikes.
+
+  b) Statistical / Threshold-Based Methods
+     - Monitor metrics such as packet rate, SYN/ACK ratio, or flow duration.
+     - Raise an alarm when a metric exceeds a fixed threshold.
+     LIMITATIONS : Cannot distinguish a flash crowd from a DDoS; thresholds
+     require tuning per-network; fail under low-and-slow attacks.
+
+  c) Classical Machine Learning (Random Forest, SVM, XGBoost)
+     - Extract hand-crafted features from flow records.
+     - Train a static classifier on labelled data.
+     LIMITATIONS : Treat each flow independently — no temporal context;
+     require expensive feature engineering; brittle across network topologies;
+     poor handling of severe class imbalance without explicit corrections.
+
+    None of these approaches model the *sequential, time-dependent* nature of
+    attack traffic, leaving a fundamental capability gap.
+
+--------------------------------------------------------------------------------
+3. PROPOSED SYSTEM
+--------------------------------------------------------------------------------
+
+  This project proposes an end-to-end deep learning pipeline centred on a
+  Bidirectional LSTM (BiLSTM) with Temporal Attention for detecting DDoS
+  attacks in real time.
+
+  Core idea :
+    A sliding window of SEQ_LEN consecutive network flow records is treated as
+    a time-series and fed to the model. The BiLSTM reads the sequence in both
+    directions, capturing both the build-up and the tail of an attack burst.
+    The Temporal Attention layer then learns *which timesteps* are most
+    discriminative, producing an interpretable context vector fed to a
+    classification head.
+
+  System Pipeline :
+
+    [Raw CSV / Synthetic Data]
+            │
+            ▼
+    [Data Cleaning & Feature Engineering]
+      • Strip whitespace from column names
+      • Remove NaN / Inf values
+      • Select 78 CIC-standard flow features
+            │
+            ▼
+    [Label Encoding]
+      • Binary  : BENIGN=0 / DDoS=1
+      • Multi   : up to 12 CIC-DDoS2019 sub-types (configurable)
+            │
+            ▼
+    [Train / Val / Test Split]  70 % / 15 % / 15 % — stratified
+            │
+            ▼
+    [RobustScaler]  fitted on train only → applied to all splits
+            │
+            ▼
+    [Sliding Window Sequence Builder]  shape: (N, SEQ_LEN, n_features)
+            │
+            ▼  [Optional SMOTE oversampling on training sequences]
+            ▼
+    [BiLSTM + Temporal Attention + MLP Head]
+            │
+            ▼
+    [Training]  AdamW | StepLR | AMP | Gradient Clip | Early Stopping
+            │
+            ▼
+    [Evaluation]  Accuracy | F1 | Kappa | ROC-AUC | Confusion Matrix
+            │
+            ▼
+    [Real-Time Streaming Simulation]  RealTimeDetector (circular buffer)
+
+  Key innovations over the existing system :
+    • Temporal modelling   — BiLSTM captures burst dynamics across 20 timesteps.
+    • Interpretability     — attention weights expose which timesteps drove
+                             each prediction (explainable AI for security ops).
+    • Imbalance handling   — class-weighted CrossEntropy + optional SMOTE.
+    • Outlier resilience   — RobustScaler instead of StandardScaler.
+    • Streaming inference  — circular buffer allows deployment in a live
+                             packet-capture or NetFlow collector pipeline.
+
+--------------------------------------------------------------------------------
+4. ROLES & TECHNOLOGY USED
+--------------------------------------------------------------------------------
+
+  ROLE                        TECHNOLOGY / COMPONENT
+  ─────────────────────────── ────────────────────────────────────────────────
+  Programming Language        Python 3.10+
+  Deep Learning Framework     PyTorch 2.1+ (model, training loop, AMP)
+  Model Architecture          torch.nn.LSTM (BiLSTM), Custom TemporalAttention,
+                              BatchNorm1d, LayerNorm, GELU activations
+  Optimiser                   torch.optim.AdamW
+  LR Scheduler                torch.optim.lr_scheduler.StepLR
+  Mixed-Precision Training    torch.amp.GradScaler + torch.amp.autocast
+  Data Manipulation           Pandas 2.0, NumPy 1.24+, PyArrow 13+
+  Feature Scaling             scikit-learn RobustScaler
+  Label Encoding              scikit-learn LabelEncoder
+  Class Imbalance             imbalanced-learn (SMOTE) + class-weighted loss
+  Train/Val/Test Split        scikit-learn train_test_split (stratified)
+  Evaluation Metrics          scikit-learn (accuracy, F1, Kappa, ROC-AUC,
+                              confusion_matrix, classification_report)
+  Visualisation               Matplotlib 3.7+, Seaborn 0.12+
+  Experiment Tracking         TensorBoard 2.14+ (logs/ directory)
+  Serialisation               Joblib (scaler / encoder), torch.save (checkpts)
+  Notebook Environment        Jupyter Lab (ipykernel, notebook 7+)
+  Progress / Utilities        tqdm 4.65+
+  Target Dataset              CIC-DDoS2019 / CICIDS-2017
+                              (or auto-generated synthetic equivalent)
+
+  SOURCE FILE MAP :
+    config.py                   All hyperparameters and directory paths
+    src/model.py                DDoSLSTM, TemporalAttention, build_model()
+    src/preprocess.py           load_and_clean, select_features,
+                                make_sequences, oversample_sequences
+    src/train.py                Standalone training script
+    src/evaluate.py             plot_confusion_matrix, plot_roc,
+                                plot_precision_recall
+    src/utils.py                set_seed, get_device, predict, smooth,
+                                save/load checkpoint, format_elapsed
+    scripts/generate_synthetic_data.py   Synthetic CIC-schema data generator
+    notebooks/ddos_lstm_detection.ipynb  End-to-end 11-section walkthrough
+
+--------------------------------------------------------------------------------
+5. LIMITATIONS
+--------------------------------------------------------------------------------
+
+  a) Synthetic Data Gap
+     The default run uses machine-generated synthetic data. Statistical
+     properties may not fully replicate zero-day attack patterns or the
+     specific traffic mix of a real enterprise network.
+
+  b) Binary Classification Default
+     The current pipeline defaults to BENIGN vs. DDoS (binary). The full
+     CIC-DDoS2019 dataset contains 12 attack sub-types; multi-class mode
+     requires setting binary=False and re-testing class balance handling.
+
+  c) Feature Set is Dataset-Specific
+     The 78 selected features match CIC-DDoS2019 column names verbatim.
+     Applying the model to other datasets (PCAP-derived flows, sFlow, IPFIX)
+     requires re-mapping or re-selecting features.
+
+  d) No Temporal Concept Drift Handling
+     The model is trained once on a static snapshot. In a live deployment,
+     network traffic distributions shift over time (new services, seasonality,
+     new attack vectors). No online learning or periodic re-training schedule
+     is currently implemented.
+
+  e) Fixed Sliding Window
+     The sequence length (SEQ_LEN=20) is a global constant. An adaptive window
+     that responds to traffic rate changes would be more robust at varying
+     network loads.
+
+  f) CPU-Only Inference Bottleneck
+     Without a CUDA-capable GPU, AMP is disabled and training is slow. The
+     real-time detector has not been benchmarked against high-throughput
+     (>1 Gbps) packet capture pipelines.
+
+  g) No Explainability Beyond Attention
+     Attention weights show *when* the model focuses but not *which features*
+     within a timestep are decisive. SHAP or LIME integration is absent.
+
+  h) No Adversarial Robustness Testing
+     The model has not been evaluated against adversarially crafted flows
+     designed to mimic benign traffic statistics while still being DDoS.
+
+--------------------------------------------------------------------------------
+6. OVERVIEW
+--------------------------------------------------------------------------------
+
+  PROJECT   : DDoS Attack Detection Using LSTM-Based Network Traffic Analysis
+  GOAL      : Classify network flow sequences as Benign or DDoS (or sub-types)
+              in near-real-time using a deep learning approach that captures
+              the temporal dynamics of attack traffic.
+
+  DATASET   : CIC-DDoS2019 / CICIDS-2017
+              78 flow-level features (duration, packet lengths, IAT stats,
+              TCP flag counts, bulk rates, subflow metrics, window sizes).
+              Severely class-imbalanced (~80% benign, ~20% DDoS in synthetic).
+
+  MODEL     : DDoSLSTM
+              Input projection (optional) → Bidirectional LSTM (2 layers,
+              128 hidden units/direction) → Temporal Attention → LayerNorm
+              → MLP head (256→128→n_classes) → Softmax.
+              Total parameters: ~1.2 M (binary config).
+
+  TRAINING  : AdamW (lr=1e-3, wd=1e-4), StepLR (step=10, γ=0.5),
+              mixed-precision AMP, gradient clipping (norm≤1.0),
+              class-weighted CrossEntropy, early stopping (patience=10),
+              best-checkpoint saved to models/nb_best.pt.
+
+  METRICS   : Accuracy, Macro-F1, Weighted-F1, Cohen's Kappa, ROC-AUC,
+              Average Precision, full per-class classification report.
+
+  REAL-TIME : RealTimeDetector — maintains a deque of SEQ_LEN flow vectors,
+              scales each incoming flow on-the-fly, fires a prediction as soon
+              as the buffer is full, and slides by one flow per tick.
+
+  STATUS    : Core pipeline fully implemented and functional in notebook.
+              Validated on synthetic data. Ready for real CSV integration.
+
+--------------------------------------------------------------------------------
+7. TECHNOLOGY STACK (QUICK REFERENCE)
+--------------------------------------------------------------------------------
+
+  Category            Technology
+  ─────────────────── ──────────────────────────────────────────────────────
+  Language            Python 3.10+
+  Deep Learning       PyTorch 2.1+
+  Data Processing     Pandas, NumPy, PyArrow
+  ML Utilities        scikit-learn, imbalanced-learn
+  Visualisation       Matplotlib, Seaborn
+  Experiment Track    TensorBoard
+  Serialisation       Joblib
+  Notebook            Jupyter (ipykernel, notebook 7+)
+  Progress Bars       tqdm
+  Dataset             CIC-DDoS2019 / CICIDS-2017
+  Methodology         Sliding-window sequences, RobustScaler, SMOTE,
+                      BiLSTM + Temporal Attention, AMP, Early Stopping,
+                      ROC-AUC, F1, Cohen's Kappa
+  Workflow            Load → Clean → Scale → Sequence → Train →
+                      Evaluate → Real-Time Simulate
+
+================================================================================
