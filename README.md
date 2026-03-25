@@ -1,6 +1,6 @@
 # DDoS Attack Detection — LSTM-Based Network Traffic Analysis
 
-> **Status: Core pipeline complete — training, evaluation, and real-time simulation fully implemented.**
+> **Status (2026-03-25): Implementation complete; reproducible training runs on real data and artifact generation are pending.**
 
 ---
 
@@ -14,11 +14,12 @@
 6. [Repository Structure](#repository-structure)
 7. [Roles & Technology Used](#roles--technology-used)
 8. [Environment Setup](#environment-setup)
-9. [Progress Report](#progress-report)
-10. [How to Run](#how-to-run)
-11. [Configuration Reference](#configuration-reference)
-12. [Limitations](#limitations)
-13. [Further Steps / Roadmap](#further-steps--roadmap)
+9. [Project Status Snapshot](#project-status-snapshot)
+10. [Progress Report](#progress-report)
+11. [How to Run](#how-to-run)
+12. [Configuration Reference](#configuration-reference)
+13. [Limitations](#limitations)
+14. [Further Steps / Roadmap](#further-steps--roadmap)
 
 ---
 
@@ -243,6 +244,24 @@ pip install -r requirements.txt
 ```
 
 **Python:** 3.10+  **PyTorch:** 2.1+  **CUDA:** optional but recommended
+
+---
+
+## Project Status Snapshot
+
+**Last updated:** 2026-03-25
+
+| Area | Current Status |
+|---|---|
+| Repository structure and core modules | Complete |
+| Data preprocessing and sequence pipeline | Complete |
+| Model architecture (BiLSTM + attention) | Complete |
+| Training and evaluation code paths | Complete |
+| Generated model artifacts in `models/` | Pending |
+| Generated reports/plots in `results/` | Pending |
+| Verified run on full real CIC dataset | Pending |
+
+This means the codebase is in a **ready-to-run implementation state**, and the next execution phase is to run training/evaluation jobs and persist outputs for benchmarking.
 
 ---
 
