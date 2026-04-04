@@ -1,97 +1,126 @@
-import pandas as pd
-import numpy as np
-import joblib
+"""
+Generate and save evaluation visualisations (confusion matrix, ROC, PR curves).
+Run from the repo root:  python src/evaluation_vis.py
+"""
+
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import numpy as np
+import pandas as pd
+import joblib
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     roc_curve,
     auc,
-    precision_recall_curve
+    precision_recall_curve,
 )
 from sklearn.preprocessing import label_binarize
+
 from tensorflow.keras.models import load_model
 
-# ---------------- CREATE OUTPUT FOLDER ----------------
-os.makedirs("results", exist_ok=True)
+import config
 
-# ---------------- LOAD ----------------
-print("Loading model...")
+# ─── Load Artifacts ───────────────────────────────────────────────────────────
+for path, label in [
+    (config.MODEL_FILE,   "Model"),
+    (config.SCALER_FILE,  "Scaler"),
+    (config.TEST_DATASET, "Test dataset"),
+]:
+    if not path.exists():
+        raise FileNotFoundError(f"{label} not found: {path}")
 
-model = load_model("model/multiclass_model.keras")
-scaler = joblib.load("model/multiclass_scaler.pkl")
+print("Loading model and test data...")
+model  = load_model(str(config.MODEL_FILE))
+scaler = joblib.load(config.SCALER_FILE)
 
-df = pd.read_csv("data/test_dataset.csv")
+try:
+    label_encoder = joblib.load(config.ENCODER_FILE)
+    class_names   = label_encoder.classes_.tolist()
+except FileNotFoundError:
+    label_encoder = None
+    class_names   = None
 
-X_test = df.drop("Label", axis=1)
-y_test = df["Label"].values
+df     = pd.read_csv(config.TEST_DATASET)
+X_test = df.drop("Label", axis=1).values
+y_test = df["Label"].values.astype(int)
 
-# ---------------- PREPROCESS ----------------
-X_test = scaler.transform(X_test)
-X_test = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
+X_input      = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
+y_pred_probs = model.predict(X_input, verbose=0)
+y_pred       = np.argmax(y_pred_probs, axis=1)
 
-# ---------------- PREDICT ----------------
-y_pred_probs = model.predict(X_test)
-y_pred = np.argmax(y_pred_probs, axis=1)
+classes = np.unique(y_test)
+if class_names is None:
+    class_names = [str(c) for c in classes]
 
-# ---------------- REPORT ----------------
 print("\nClassification Report:")
-print(classification_report(y_test, y_pred))
+print(classification_report(y_test, y_pred, target_names=class_names, zero_division=0))
 
-# ---------------- CONFUSION MATRIX ----------------
+# ─── Graph 1: Confusion Matrix Heatmap ───────────────────────────────────────
 cm = confusion_matrix(y_test, y_pred)
 
-print("\nConfusion Matrix:")
-print(cm)
+fig, ax = plt.subplots(figsize=(max(6, len(classes)), max(5, len(classes) - 1)))
+sns.heatmap(
+    cm,
+    annot=True,
+    fmt="d",
+    cmap="Blues",
+    xticklabels=class_names,
+    yticklabels=class_names,
+    ax=ax,
+)
+ax.set_title("Confusion Matrix")
+ax.set_xlabel("Predicted")
+ax.set_ylabel("Actual")
+plt.tight_layout()
 
-# 🔥 GRAPH 1: CONFUSION MATRIX HEATMAP
-plt.figure()
-plt.imshow(cm)
-plt.title("Confusion Matrix Heatmap")
-plt.xlabel("Predicted")
-plt.ylabel("Actual")
+out_path = config.RESULTS_DIR / "confusion_matrix.png"
+fig.savefig(out_path, dpi=150)
+plt.close(fig)
+print(f"Saved: {out_path}")
 
-for i in range(cm.shape[0]):
-    for j in range(cm.shape[1]):
-        plt.text(j, i, cm[i, j], ha="center", va="center")
-
-plt.savefig("results/confusion_matrix.png")
-plt.show()
-
-# ---------------- ROC CURVE ----------------
-classes = np.unique(y_test)
+# ─── Graph 2: ROC Curve (one-vs-rest) ─────────────────────────────────────────
 y_test_bin = label_binarize(y_test, classes=classes)
 
-plt.figure()
-
-for i in range(len(classes)):
+fig, ax = plt.subplots(figsize=(8, 6))
+for i, cls in enumerate(classes):
     fpr, tpr, _ = roc_curve(y_test_bin[:, i], y_pred_probs[:, i])
     roc_auc = auc(fpr, tpr)
-    plt.plot(fpr, tpr, label=f"Class {i} (AUC={roc_auc:.2f})")
+    ax.plot(fpr, tpr, label=f"{class_names[i]} (AUC={roc_auc:.2f})")
 
-plt.xlabel("False Positive Rate")
-plt.ylabel("True Positive Rate")
-plt.title("ROC Curve (Multiclass)")
-plt.legend()
+ax.plot([0, 1], [0, 1], "k--", linewidth=0.8)
+ax.set_xlabel("False Positive Rate")
+ax.set_ylabel("True Positive Rate")
+ax.set_title("ROC Curve (Multiclass OvR)")
+ax.legend(fontsize=8)
+plt.tight_layout()
 
-plt.savefig("results/roc_curve.png")
-plt.show()
+out_path = config.RESULTS_DIR / "roc_curve.png"
+fig.savefig(out_path, dpi=150)
+plt.close(fig)
+print(f"Saved: {out_path}")
 
-# ---------------- PRECISION-RECALL CURVE ----------------
-plt.figure()
-
-for i in range(len(classes)):
+# ─── Graph 3: Precision-Recall Curve ─────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(8, 6))
+for i, cls in enumerate(classes):
     precision, recall, _ = precision_recall_curve(y_test_bin[:, i], y_pred_probs[:, i])
-    plt.plot(recall, precision, label=f"Class {i}")
+    pr_auc = auc(recall, precision)
+    ax.plot(recall, precision, label=f"{class_names[i]} (AUC={pr_auc:.2f})")
 
-plt.xlabel("Recall")
-plt.ylabel("Precision")
-plt.title("Precision-Recall Curve")
-plt.legend()
+ax.set_xlabel("Recall")
+ax.set_ylabel("Precision")
+ax.set_title("Precision-Recall Curve")
+ax.legend(fontsize=8)
+plt.tight_layout()
 
-plt.savefig("results/precision_recall_curve.png")
-plt.show()
+out_path = config.RESULTS_DIR / "precision_recall_curve.png"
+fig.savefig(out_path, dpi=150)
+plt.close(fig)
+print(f"Saved: {out_path}")
 
-print("\n✅ Graphs saved in 'results/' folder")
+print(f"\nAll graphs saved in '{config.RESULTS_DIR}/'")
