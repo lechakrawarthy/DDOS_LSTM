@@ -26,7 +26,7 @@ print("Loading dataset...")
 if not config.MULTICLASS_DATASET.exists():
     raise FileNotFoundError(
         f"Dataset not found: {config.MULTICLASS_DATASET}\n"
-        "Run  python src/preprocess.py  first to generate it."
+        "Run  python build_dataset.py  first to generate it."
     )
 
 df = pd.read_csv(config.MULTICLASS_DATASET)

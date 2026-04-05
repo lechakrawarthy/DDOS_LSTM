@@ -123,7 +123,7 @@ SELECTED_FEATURES = [
 TEST_SIZE    = 0.15          # 70 / 15 / 15 train-val-test split
 VAL_SIZE     = 0.15
 RANDOM_STATE = 42
-OVERSAMPLE   = True          # Apply SMOTE on training set
+OVERSAMPLE   = False         # Majority classes capped at 50k in build_dataset.py; SMOTE not used
 
 # ─── Model ────────────────────────────────────────────────────────────────────
 HIDDEN_SIZE = 128

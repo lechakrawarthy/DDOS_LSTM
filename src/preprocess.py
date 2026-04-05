@@ -1,18 +1,11 @@
 """
-Preprocessing pipeline: raw CIC-DDoS2019 CSVs -> data/multiclass_dataset.csv
+Legacy preprocessing utilities (not the active pipeline).
 
-Steps
------
-1. Load each raw CSV from dataset/raw_dataset/
-2. Strip whitespace from column names
-3. Select the 78 CIC standard features (from config.SELECTED_FEATURES)
-4. Encode the label column to integer class IDs
-5. Drop rows with NaN / inf values
-6. Optionally apply SMOTE oversampling (config.OVERSAMPLE)
-7. Save final dataset to data/multiclass_dataset.csv
-8. Save label encoder to model/label_encoder.pkl
+The active dataset build script is build_dataset.py (repo root).
+build_dataset.py uses 75 confirmed features, stratified sampling to 50k rows
+per class, and does not apply SMOTE.
 
-Run from the repo root:  python src/preprocess.py
+This file is retained for reference only.
 """
 
 import sys
