@@ -1,162 +1,74 @@
 # DDoS Attack Detection — LSTM-Based Network Traffic Analysis
 
-> **Status (2026-03-25): Implementation complete; reproducible training runs on real data and artifact generation are pending.**
+Multiclass DDoS detection using a TensorFlow/Keras LSTM trained on the
+[CIC-DDoS2019](https://www.unb.ca/cic/datasets/ddos-2019.html) dataset.
+Detects 6 attack types + benign traffic from 75 CIC-standard flow features,
+with a live packet capture module for real-time inference.
+
+**Evaluation results (held-out test set, 40,933 samples):**
+
+| Metric | Value |
+|---|---|
+| Accuracy | 83.64% |
+| F1 (Weighted) | 0.80 |
+| Cohen's Kappa | 0.80 |
+| MCC | 0.82 |
+| ROC-AUC (OvR macro) | 0.97 |
 
 ---
 
 ## Table of Contents
 
-1. [Title Justification](#title-justification)
-2. [Existing System](#existing-system)
-3. [Proposed System](#proposed-system)
-4. [Project Overview](#project-overview)
-5. [Architecture](#architecture)
-6. [Repository Structure](#repository-structure)
-7. [Roles & Technology Used](#roles--technology-used)
-8. [Environment Setup](#environment-setup)
-9. [Project Status Snapshot](#project-status-snapshot)
-10. [Progress Report](#progress-report)
-11. [How to Run](#how-to-run)
-12. [Configuration Reference](#configuration-reference)
-13. [Limitations](#limitations)
-14. [Further Steps / Roadmap](#further-steps--roadmap)
-
----
-
-## Title Justification
-
-**Title:** "DDoS Attack Detection Using LSTM-Based Network Traffic Analysis"
-
-Distributed Denial-of-Service (DDoS) attacks remain one of the most disruptive and economically damaging cyber threats. Attackers flood a target host or network segment with artificially generated traffic, exhausting bandwidth, CPU, and connection-table resources until legitimate users are denied access.
-
-Traditional intrusion detection systems (IDS) rely on hand-crafted signature rules or shallow statistical thresholds. These approaches:
-- Fail against novel or morphed attack variants
-- Require constant manual rule maintenance
-- Cannot model the temporal dynamics of a flow burst
-
-Network traffic is inherently **sequential** — each flow follows another in time, and attack patterns manifest as anomalous *sequences* of flows rather than isolated packets. Long Short-Term Memory (LSTM) networks are specifically designed to learn patterns over time-ordered sequences, making them a natural architectural match for this problem.
-
-The "LSTM-Based" qualifier in the title is therefore technically precise: the model ingests sliding windows of consecutive flow records and classifies whether the sequence represents a DDoS burst or benign traffic, leveraging temporal dependencies that static classifiers cannot capture.
-
----
-
-## Existing System
-
-Current production-grade DDoS detection systems broadly fall into three categories:
-
-**a) Signature / Rule-Based IDS** (e.g., Snort, Suricata)
-- Maintain a database of known attack patterns; generate alerts when traffic matches rules.
-- **Limitations:** Zero-day attacks evade detection; rules require continuous manual updates; high false-positive rates under legitimate traffic spikes.
-
-**b) Statistical / Threshold-Based Methods**
-- Monitor metrics such as packet rate, SYN/ACK ratio, or flow duration; raise an alarm when a metric exceeds a fixed threshold.
-- **Limitations:** Cannot distinguish a flash crowd from a DDoS; thresholds require per-network tuning; fail under low-and-slow attacks.
-
-**c) Classical Machine Learning** (Random Forest, SVM, XGBoost)
-- Extract hand-crafted features from flow records and train a static classifier.
-- **Limitations:** Treat each flow independently — no temporal context; require expensive feature engineering; brittle across network topologies; poor handling of severe class imbalance without explicit corrections.
-
-> None of these approaches model the *sequential, time-dependent* nature of attack traffic, leaving a fundamental capability gap.
-
----
-
-## Proposed System
-
-This project proposes an end-to-end deep learning pipeline centred on a **Bidirectional LSTM (BiLSTM) with Temporal Attention** for detecting DDoS attacks in real time.
-
-**Core idea:** A sliding window of `SEQ_LEN` consecutive network flow records is treated as a time-series and fed to the model. The BiLSTM reads the sequence in both directions, capturing both the build-up and the tail of an attack burst. The Temporal Attention layer then learns *which timesteps* are most discriminative, producing an interpretable context vector fed to a classification head.
-
-**System Pipeline:**
-
-```
-[Raw CSV / Synthetic Data]
-        │
-        ▼
-[Data Cleaning & Feature Engineering]
-  • Strip whitespace from column names
-  • Remove NaN / Inf values
-  • Select 78 CIC-standard flow features
-        │
-        ▼
-[Label Encoding]
-  • Binary : BENIGN=0 / DDoS=1
-  • Multi  : up to 12 CIC-DDoS2019 sub-types (configurable)
-        │
-        ▼
-[Train / Val / Test Split]  70% / 15% / 15% — stratified
-        │
-        ▼
-[RobustScaler]  fitted on train only → applied to all splits
-        │
-        ▼
-[Sliding Window Sequence Builder]  shape: (N, SEQ_LEN, n_features)
-        │
-        ▼  [Optional SMOTE oversampling on training sequences]
-        ▼
-[BiLSTM + Temporal Attention + MLP Head]
-        │
-        ▼
-[Training]  AdamW | StepLR | AMP | Gradient Clip | Early Stopping
-        │
-        ▼
-[Evaluation]  Accuracy | F1 | Kappa | ROC-AUC | Confusion Matrix
-        │
-        ▼
-[Real-Time Streaming Simulation]  RealTimeDetector (circular buffer)
-```
-
-**Key innovations over the existing system:**
-- **Temporal modelling** — BiLSTM captures burst dynamics across 20 timesteps
-- **Interpretability** — attention weights expose which timesteps drove each prediction (explainable AI for security ops)
-- **Imbalance handling** — class-weighted CrossEntropy + optional SMOTE
-- **Outlier resilience** — RobustScaler instead of StandardScaler
-- **Streaming inference** — circular buffer allows deployment in a live packet-capture or NetFlow collector pipeline
+1. [Project Overview](#project-overview)
+2. [Architecture](#architecture)
+3. [Repository Structure](#repository-structure)
+4. [Dataset](#dataset)
+5. [Environment Setup](#environment-setup)
+6. [How to Run](#how-to-run)
+7. [Configuration Reference](#configuration-reference)
+8. [Results](#results)
+9. [Limitations](#limitations)
+10. [Technologies Used](#technologies-used)
 
 ---
 
 ## Project Overview
 
-Binary and multi-class classification of network traffic flows as **Benign** or **DDoS** using a Bidirectional LSTM with temporal attention.
+This project builds an end-to-end pipeline for detecting DDoS attacks from
+network flow records. The pipeline goes from raw CIC-DDoS2019 CSV files
+(10.8 million rows, 4.6 GB) through preprocessing, LSTM training, evaluation,
+and live packet capture inference.
 
-**Target Dataset:** [CIC-DDoS2019 / CICIDS-2017](https://www.unb.ca/cic/datasets/ddos-2019.html)  
-A synthetic dataset with the same schema is auto-generated when the real CSV is absent.
+**7 classes:** BENIGN, DrDoS_DNS, DrDoS_NTP, DrDoS_SSDP, Syn, UDP-lag, WebDDoS
 
-**Key design principles:**
-- Class-weighted loss to handle severe label imbalance
-- RobustScaler to neutralise outlier-driven feature dominance
-- Temporal attention to highlight which timesteps drive each prediction
-- Optional SMOTE oversampling for minority-class augmentation
-- Mixed-precision training (AMP) + gradient clipping for stability
-- Early stopping + best-checkpoint saving
+**Why LSTM?** Network traffic is sequential — DDoS attacks manifest as
+anomalous patterns across consecutive flows, not as isolated packets. LSTM
+networks are designed to model exactly this kind of time-ordered dependency.
 
 ---
 
 ## Architecture
 
 ```
-Input (batch, seq_len, n_features)
-       │
-[Optional] Input Projection  (Linear → LayerNorm → GELU)
-       │
-BiLSTM — stacked, N layers, dropout between layers
-       │
-Temporal Attention  (soft attention → context vector)
-       │
-MLP Head  (Linear → BN → GELU → Dropout → Linear)
-       │
-Output logits  (n_classes)
+Input: (batch_size, timesteps=1, features=75)
+        │
+  LSTM Layer 1  — 128 units, return_sequences=True, dropout=0.3
+        │
+  LSTM Layer 2  — 64 units, dropout=0.3
+        │
+  Dense Layer   — 64 units, ReLU
+        │
+  Dropout       — rate=0.3
+        │
+  Output Dense  — 7 units, Softmax
+        │
+Prediction: class label + confidence score
 ```
 
-| Component | Detail |
-|---|---|
-| LSTM type | Bidirectional, stacked |
-| Hidden size | 128 (per direction, configurable) |
-| Layers | 2 (configurable) |
-| Attention | Soft temporal (Bahdanau-style) |
-| Optimizer | AdamW |
-| Scheduler | StepLR |
-| Loss | CrossEntropyLoss (class-weighted) |
-| Sequence length | 20 timesteps (sliding window) |
+- **Framework:** TensorFlow 2.21 / Keras 3
+- **Optimizer:** Adam, sparse categorical crossentropy loss
+- **Callbacks:** EarlyStopping (patience=5), ModelCheckpoint, ReduceLROnPlateau
+- **Saved format:** `.keras` (1.9 MB)
 
 ---
 
@@ -164,202 +76,228 @@ Output logits  (n_classes)
 
 ```
 DDOS_LSTM/
-├── config.py                        # All hyperparameters and paths
+├── config.py                    # All hyperparameters and paths
 ├── requirements.txt
-├── README.md
+├── build_dataset.py             # Raw CSVs → data/multiclass_dataset.csv
+│
+├── dataset/
+│   └── raw_dataset/             # Place CIC-DDoS2019 CSVs here
+│       ├── DrDoS_DNS.csv
+│       ├── DrDoS_NTP.csv
+│       ├── DrDoS_SSDP.csv
+│       ├── Syn.csv
+│       └── UDPLag.csv
 │
 ├── data/
-│   ├── raw/
-│   │   └── network_traffic.csv      # Place CIC-DDoS2019 CSV here
-│   └── processed/                   # Scaler, encoder, processed pkl (auto-generated)
+│   ├── multiclass_dataset.csv   # 272,884 rows × 75 features (generated)
+│   └── test_dataset.csv         # 40,933 held-out test samples (generated)
 │
-├── models/                          # Saved checkpoints (.pt files)
-├── results/                         # Evaluation plots and reports
-├── logs/                            # TensorBoard logs
+├── model/
+│   ├── multiclass_model.keras   # Trained LSTM (1.9 MB)
+│   ├── multiclass_scaler.pkl    # Fitted StandardScaler (75 features)
+│   └── label_encoder.pkl        # LabelEncoder (7 classes)
 │
-├── notebooks/
-│   └── ddos_lstm_detection.ipynb    # Full end-to-end pipeline notebook
-│
-├── scripts/
-│   └── generate_synthetic_data.py   # Generates synthetic CIC-schema data
+├── results/
+│   ├── fig1_system_pipeline.png
+│   ├── fig2_model_architecture.png
+│   ├── fig3_label_distribution.png
+│   ├── fig4_preprocessing_workflow.png
+│   ├── fig5_training_curves.png
+│   ├── confusion_matrix.png
+│   ├── roc_curve.png
+│   └── precision_recall_curve.png
 │
 └── src/
-    ├── __init__.py
-    ├── model.py        # DDoSLSTM, TemporalAttention, build_model()
-    ├── preprocess.py   # load_and_clean, select_features, make_sequences, etc.
-    ├── train.py        # Standalone training script
-    ├── evaluate.py     # plot_confusion_matrix, plot_roc, plot_precision_recall
-    └── utils.py        # set_seed, get_device, predict, smooth, checkpointing
+    ├── model_multi_final.py     # Train LSTM → model + scaler + test set
+    ├── evaluation.py            # Full metrics on test set
+    ├── evaluation_vis.py        # Confusion matrix, ROC, PR curve plots
+    ├── prediction.py            # Single random sample inference
+    └── live_capture.py          # Real-time pyshark capture + inference
 ```
 
 ---
 
-## Roles & Technology Used
+## Dataset
 
-| Role | Technology / Component |
-|---|---|
-| Programming Language | Python 3.10+ |
-| Deep Learning Framework | PyTorch 2.1+ (model, training loop, AMP) |
-| Model Architecture | `torch.nn.LSTM` (BiLSTM), `TemporalAttention`, `BatchNorm1d`, `LayerNorm`, GELU |
-| Optimiser | `torch.optim.AdamW` |
-| LR Scheduler | `torch.optim.lr_scheduler.StepLR` |
-| Mixed-Precision Training | `torch.amp.GradScaler` + `torch.amp.autocast` |
-| Data Manipulation | Pandas 2.0, NumPy 1.24+, PyArrow 13+ |
-| Feature Scaling | scikit-learn `RobustScaler` |
-| Label Encoding | scikit-learn `LabelEncoder` |
-| Class Imbalance | imbalanced-learn (SMOTE) + class-weighted loss |
-| Train/Val/Test Split | scikit-learn `train_test_split` (stratified) |
-| Evaluation Metrics | scikit-learn (accuracy, F1, Kappa, ROC-AUC, confusion matrix) |
-| Visualisation | Matplotlib 3.7+, Seaborn 0.12+ |
-| Experiment Tracking | TensorBoard 2.14+ (`logs/` directory) |
-| Serialisation | Joblib (scaler / encoder), `torch.save` (checkpoints) |
-| Notebook Environment | Jupyter Lab (ipykernel, notebook 7+) |
-| Progress / Utilities | tqdm 4.65+ |
-| Target Dataset | CIC-DDoS2019 / CICIDS-2017 (or auto-generated synthetic equivalent) |
+**CIC-DDoS2019** — Canadian Institute for Cybersecurity, University of New
+Brunswick. Traffic captured 1 December 2018 in a controlled lab testbed.
+CICFlowMeter computed 88 bidirectional flow features per record.
 
-**Source file map:**
+| File | Attack Type | Records |
+|---|---|---|
+| DrDoS_DNS.csv | DNS Amplification | 5,074,413 |
+| DrDoS_NTP.csv | NTP Amplification | 1,217,007 |
+| DrDoS_SSDP.csv | SSDP Amplification | 2,611,374 |
+| Syn.csv | SYN Flood | 1,582,681 |
+| UDPLag.csv | UDP Lag Attack | 370,605 |
+| **Total** | | **10,856,080** |
 
-| File | Responsibility |
-|---|---|
-| `config.py` | All hyperparameters and directory paths |
-| `src/model.py` | `DDoSLSTM`, `TemporalAttention`, `build_model()` |
-| `src/preprocess.py` | `load_and_clean`, `select_features`, `make_sequences`, `oversample_sequences` |
-| `src/train.py` | Standalone training script |
-| `src/evaluate.py` | `plot_confusion_matrix`, `plot_roc`, `plot_precision_recall` |
-| `src/utils.py` | `set_seed`, `get_device`, `predict`, `smooth`, save/load checkpoint |
-| `scripts/generate_synthetic_data.py` | Synthetic CIC-schema data generator |
-| `notebooks/ddos_lstm_detection.ipynb` | End-to-end 11-section walkthrough |
+BENIGN and WebDDoS labels are embedded within these files. After stratified
+sampling (50,000 rows per class cap), the training dataset is 272,884 rows
+across 7 classes (BENIGN: 22,445; WebDDoS: 439 — all available rows retained).
+
+> Raw CSVs are not committed to the repository (~4.6 GB). Place them in
+> `dataset/raw_dataset/` before running `build_dataset.py`.
 
 ---
 
 ## Environment Setup
 
-```powershell
-# Create and activate virtual environment (example with virtualenvwrapper)
-mkvirtualenv ddos-lstm
-workon ddos-lstm               # or: & .venv\Scripts\Activate.ps1
+```bash
+# Clone repo
+git clone <repo-url>
+cd DDOS_LSTM
+
+# Create virtual environment
+python -m venv .venv
+
+# Activate — Windows
+.venv\Scripts\activate
+
+# Activate — Linux / Mac
+source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
 ```
 
-**Python:** 3.10+  **PyTorch:** 2.1+  **CUDA:** optional but recommended
-
----
-
-## Project Status Snapshot
-
-**Last updated:** 2026-03-25
-
-| Area | Current Status |
-|---|---|
-| Repository structure and core modules | Complete |
-| Data preprocessing and sequence pipeline | Complete |
-| Model architecture (BiLSTM + attention) | Complete |
-| Training and evaluation code paths | Complete |
-| Generated model artifacts in `models/` | Pending |
-| Generated reports/plots in `results/` | Pending |
-| Verified run on full real CIC dataset | Pending |
-
-This means the codebase is in a **ready-to-run implementation state**, and the next execution phase is to run training/evaluation jobs and persist outputs for benchmarking.
-
----
-
-## Progress Report
-
-### ✅ Completed
-
-| # | Component | Status | Notes |
-|---|---|---|---|
-| 1 | Project scaffolding | Done | `src/`, `scripts/`, `config.py`, `requirements.txt` |
-| 2 | Synthetic data generator | Done | `scripts/generate_synthetic_data.py` — CIC-DDoS2019 schema |
-| 3 | Data loading & EDA | Done | Class distribution, missing-value check, dtypes |
-| 4 | Preprocessing pipeline | Done | `src/preprocess.py` — clean, select features, encode labels |
-| 5 | Feature engineering | Done | 78-feature CIC column set, variance-based importance plot |
-| 6 | Train/Val/Test split | Done | Stratified, 70/15/15, `split_data()` |
-| 7 | Scaling | Done | `RobustScaler`, fitted on train only, applied to all splits |
-| 8 | Sequence generation | Done | Sliding window → `(N, SEQ_LEN, n_features)` tensors |
-| 9 | SMOTE oversampling | Done | Optional via `cfg.OVERSAMPLE`, `oversample_sequences()` |
-| 10 | LSTM model | Done | `DDoSLSTM` — BiLSTM + temporal attention + MLP head |
-| 11 | Training loop | Done | AMP, gradient clipping, early stopping, checkpoint saving |
-| 12 | Evaluation metrics | Done | Accuracy, F1, Cohen's Kappa, ROC-AUC, classification report |
-| 13 | Visualisations | Done | Loss/accuracy curves, confusion matrices, ROC, PR curve |
-| 14 | Real-time simulation | Done | `RealTimeDetector` — circular buffer streaming inference |
-| 15 | Attention visualisation | Done | Per-timestep attention weights plotted for DDoS samples |
-| 16 | Notebook | Done | `ddos_lstm_detection.ipynb` — 11-section end-to-end walkthrough |
+**For live capture only:** Install
+[Wireshark](https://www.wireshark.org/download.html) (includes tshark +
+Npcap). Run the live capture script as Administrator on Windows.
 
 ---
 
 ## How to Run
 
-### Option A — Notebook (recommended for exploration)
+Run all commands from the **repo root** with `.venv` active.
 
-```powershell
-cd notebooks
-jupyter lab ddos_lstm_detection.ipynb
+### Step 1 — Build dataset (requires raw CSVs in `dataset/raw_dataset/`)
+
+```bash
+python build_dataset.py
 ```
 
-Run cells top-to-bottom. Synthetic data is auto-generated if no real CSV is present.
+Outputs: `data/multiclass_dataset.csv`, `model/label_encoder.pkl`
 
-### Option B — Standalone script
+### Step 2 — Train model
 
-```powershell
-# From repo root
-python src/train.py
+```bash
+python src/model_multi_final.py
+```
+
+Outputs: `model/multiclass_model.keras`, `model/multiclass_scaler.pkl`,
+`data/test_dataset.csv`
+
+### Step 3 — Evaluate
+
+```bash
+python src/evaluation.py      # prints all metrics to terminal
+python src/evaluation_vis.py  # saves plots to results/
+```
+
+### Step 4 — Single sample prediction
+
+```bash
+python src/prediction.py
+```
+
+### Step 5 — Live capture (requires Wireshark + run as Administrator)
+
+```bash
+# List available network interfaces
+python src/live_capture.py --list-ifaces
+
+# Capture on Wi-Fi, classify every 10 packets
+python src/live_capture.py --interface "Wi-Fi" --batch 10
+```
+
+Output example:
+```
+[20:42:11] Window #1 (10 packets):
+  [01] BENIGN  | conf=0.934
+  [02] BENIGN  | conf=0.891
+  ...
 ```
 
 ---
 
 ## Configuration Reference
 
-All settings live in `config.py`. Key knobs:
+All settings are in `config.py`.
 
-| Parameter | Default | Description |
+| Parameter | Value | Description |
 |---|---|---|
-| `SEQUENCE_LEN` | 20 | Sliding window size (timesteps per sample) |
-| `HIDDEN_SIZE` | 128 | LSTM hidden units per direction |
-| `NUM_LAYERS` | 2 | Stacked LSTM layers |
-| `DROPOUT` | 0.3 | Dropout probability |
-| `BIDIRECTIONAL` | True | Use BiLSTM |
-| `EPOCHS` | 50 | Max training epochs |
+| `HIDDEN_SIZE` | 128 | Units in first LSTM layer |
+| `DROPOUT` | 0.3 | Dropout rate on LSTM and Dense layers |
+| `EPOCHS` | 30 | Max training epochs (early stopping applies) |
 | `BATCH_SIZE` | 256 | Mini-batch size |
-| `LEARNING_RATE` | 1e-3 | AdamW initial LR |
-| `WEIGHT_DECAY` | 1e-4 | AdamW weight decay |
-| `LR_STEP_SIZE` | 10 | StepLR step (epochs) |
-| `LR_GAMMA` | 0.5 | StepLR decay factor |
-| `PATIENCE` | 10 | Early stopping patience |
-| `GRAD_CLIP` | 1.0 | Gradient norm clip |
-| `OVERSAMPLE` | False | Enable SMOTE on training set |
-| `RANDOM_STATE` | 42 | Global seed |
+| `LEARNING_RATE` | 1e-3 | Initial Adam learning rate |
+| `PATIENCE` | 5 | Early stopping patience |
+| `TEST_SIZE` | 0.15 | Test split fraction |
+| `VAL_SIZE` | 0.15 | Validation split fraction |
+| `RANDOM_STATE` | 42 | Global random seed |
+| `CAPTURE_BATCH_SIZE` | 10 | Packets per inference window (live capture) |
 
 ---
 
-## Further Steps / Roadmap
+## Results
 
-### High Priority
+### Per-class performance (test set, 40,933 samples)
 
-- [ ] **Run with real CIC-DDoS2019 data** — download the dataset, place `network_traffic.csv` in `data/raw/`, and re-run the notebook to validate performance on real traffic.
-- [ ] **Multi-class classification** — the model already supports `n_classes > 2`; set `binary=False` in `encode_labels()` and test against all 12 attack sub-types in CIC-DDoS2019.
-- [ ] **Hyperparameter tuning** — grid/random search over `HIDDEN_SIZE`, `NUM_LAYERS`, `SEQUENCE_LEN`, `DROPOUT`. Consider using `optuna` for Bayesian optimisation.
-- [ ] **TensorBoard integration** — `LOGS_DIR` is already created; wire up `SummaryWriter` in `src/train.py` to log loss, accuracy, and LR curves.
+| Class | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| BENIGN | 0.98 | 0.98 | 0.98 | 3,367 |
+| DrDoS_DNS | 0.96 | 0.97 | 0.97 | 7,500 |
+| DrDoS_NTP | 0.99 | 0.99 | 0.99 | 7,500 |
+| DrDoS_SSDP | 0.87 | 0.98 | 0.92 | 7,500 |
+| Syn | 0.60 | 0.99 | 0.75 | 7,500 |
+| UDP-lag | 0.94 | 0.19 | 0.32 | 7,500 |
+| WebDDoS | 0.70 | 0.24 | 0.36 | 66 |
 
-### Model Improvements
+### Output plots (`results/`)
 
-- [ ] **Transformer / TCN baseline** — compare BiLSTM against a Temporal Convolutional Network or a lightweight Transformer encoder to quantify the value of the recurrent architecture.
-- [ ] **Threshold tuning** — the current decision threshold is 0.5; sweep thresholds on the val set to optimise F1 or a custom cost metric (false negatives are more costly than false positives in DDoS detection).
-- [ ] **Export & deployment** — export trained model to ONNX (`torch.onnx.export`) or TorchScript for embedding in a network monitoring daemon or packet capture pipeline.
-- [ ] **Quantisation / pruning** — INT8 post-training quantisation to reduce inference latency for real-time use.
+| File | Description |
+|---|---|
+| `fig1_system_pipeline.png` | Full end-to-end pipeline diagram |
+| `fig2_model_architecture.png` | LSTM layer-by-layer architecture |
+| `fig3_label_distribution.png` | Class distribution bar chart |
+| `fig4_preprocessing_workflow.png` | Step-by-step preprocessing flow |
+| `fig5_training_curves.png` | Loss and accuracy vs. epoch |
+| `confusion_matrix.png` | 7×7 confusion matrix heatmap |
+| `roc_curve.png` | ROC curves per class (one-vs-rest) |
+| `precision_recall_curve.png` | PR curves per class |
 
-### Engineering & Ops
+---
 
-- [ ] **`src/train.py` CLI flags** — wire `argparse` so `--epochs`, `--lr`, `--seq-len`, etc. can be overridden without editing `config.py`.
-- [ ] **Unit tests** — add `tests/` with pytest coverage for `preprocess.py` (sequence shapes, scaler leakage check) and `model.py` (forward pass output shape, attention sum-to-one).
-- [ ] **CI pipeline** — GitHub Actions workflow: lint (`ruff`), type-check (`mypy`), run unit tests on CPU.
-- [ ] **Results persistence** — save final metrics JSON to `results/metrics.json` at end of training so runs are reproducible and comparable.
-- [ ] **`results/` report** — auto-save all evaluation plots (currently displayed inline) to `results/` as PNG files using `src/evaluate.py` helpers.
+## Limitations
 
-### Data & Generalisation
+**UDP-lag (recall 0.19):** Feature overlap with Syn flows — both are
+high-volume, short-duration flows. ROC-AUC for this class is still above 0.90;
+the issue is at the hard decision boundary, not in the learned representations.
 
-- [ ] **Cross-dataset validation** — train on CIC-DDoS2019, test on CICIDS-2017 (or vice versa) to assess generalisation across network environments.
-- [ ] **Feature ablation study** — systematically remove feature groups (IAT, flag counts, bulk rate, etc.) to identify the most discriminative subsets and reduce inference-time dimensionality.
-- [ ] **Concept drift simulation** — insert temporal distribution shift mid-stream in the real-time simulation to test detector robustness and explore online adaptation strategies.
+**WebDDoS (recall 0.24):** Only 439 total samples in the raw dataset. With 373
+training examples the model defaults to BENIGN for ambiguous cases.
+
+**Sequence length = 1:** Each flow is classified independently. The LSTM's
+temporal memory across multiple consecutive flows is not exploited. A sliding
+window of 20 flows would be the highest-impact improvement.
+
+**Live capture features:** `live_capture.py` computes per-packet
+approximations of CICFlowMeter flow-level statistics. Integrating
+CICFlowMeter into the live path would produce exact feature matches.
+
+---
+
+## Technologies Used
+
+| Category | Tool | Version |
+|---|---|---|
+| Deep Learning | TensorFlow / Keras | 2.21.0 |
+| Data | Pandas, NumPy | ≥2.0, ≥1.24 |
+| ML Utilities | scikit-learn | ≥1.3 |
+| Serialisation | Joblib | ≥1.3 |
+| Visualisation | Matplotlib, Seaborn | ≥3.7, ≥0.12 |
+| Packet Capture | PyShark | 0.6 |
+| Packet Dissection | Wireshark / tshark | 4.4.3 |
+| Language | Python | 3.10+ |
+| Dataset | CIC-DDoS2019 | 2019 |

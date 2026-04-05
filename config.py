@@ -6,29 +6,41 @@ All hyperparameters, paths, and dataset settings are centralised here.
 from pathlib import Path
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
-ROOT_DIR       = Path(__file__).parent
-DATA_RAW_DIR   = ROOT_DIR / "data" / "raw"
-DATA_PROC_DIR  = ROOT_DIR / "data" / "processed"
-MODELS_DIR     = ROOT_DIR / "models"
-RESULTS_DIR    = ROOT_DIR / "results"
-LOGS_DIR       = ROOT_DIR / "logs"
+ROOT_DIR        = Path(__file__).parent
+DATA_DIR        = ROOT_DIR / "data"
+RAW_DATASET_DIR = ROOT_DIR / "dataset" / "raw_dataset"
+PROC_DATASET_DIR= ROOT_DIR / "dataset" / "processed_dataset"
+MODELS_DIR      = ROOT_DIR / "model"
+RESULTS_DIR     = ROOT_DIR / "results"
+LOGS_DIR        = ROOT_DIR / "logs"
 
-for _dir in (DATA_RAW_DIR, DATA_PROC_DIR, MODELS_DIR, RESULTS_DIR, LOGS_DIR):
+for _dir in (DATA_DIR, MODELS_DIR, RESULTS_DIR, LOGS_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
-# ─── Dataset ──────────────────────────────────────────────────────────────────
-# Expected raw CSV file (CIC-DDoS2019 / CICIDS-2017 or similar).
-# Drop this CSV into data/raw/ before running the pipeline.
-RAW_CSV        = DATA_RAW_DIR / "network_traffic.csv"
-PROCESSED_FILE = DATA_PROC_DIR / "processed_data.pkl"
-SCALER_FILE    = DATA_PROC_DIR / "scaler.pkl"
-ENCODER_FILE   = DATA_PROC_DIR / "label_encoder.pkl"
+# ─── Dataset Files ────────────────────────────────────────────────────────────
+# Raw CIC-DDoS2019 CSVs (in dataset/raw_dataset/)
+RAW_CSVS = [
+    RAW_DATASET_DIR / "DrDoS_DNS.csv",
+    RAW_DATASET_DIR / "DrDoS_NTP.csv",
+    RAW_DATASET_DIR / "DrDoS_SSDP.csv",
+    RAW_DATASET_DIR / "Syn.csv",
+    RAW_DATASET_DIR / "UDPLag.csv",
+]
+
+# Intermediate & final processed files (in data/)
+MULTICLASS_DATASET = DATA_DIR / "multiclass_dataset.csv"
+TEST_DATASET       = DATA_DIR / "test_dataset.csv"
+
+# ─── Model Artifact Files ─────────────────────────────────────────────────────
+MODEL_FILE   = MODELS_DIR / "multiclass_model.keras"
+SCALER_FILE  = MODELS_DIR / "multiclass_scaler.pkl"
+ENCODER_FILE = MODELS_DIR / "label_encoder.pkl"
 
 # ─── Feature Engineering ──────────────────────────────────────────────────────
-# CIC-DDoS2019 column name for the label (adjust if using a different dataset)
-LABEL_COLUMN   = " Label"
+# CIC-DDoS2019 label column (leading space is intentional – matches raw header)
+LABEL_COLUMN = " Label"
 
-# Features selected after removing identifiers / constant / leaky columns
+# 78 features selected after removing identifiers / constant / leaky columns
 SELECTED_FEATURES = [
     " Flow Duration",
     " Total Fwd Packets",
@@ -108,31 +120,28 @@ SELECTED_FEATURES = [
 ]
 
 # ─── Preprocessing ────────────────────────────────────────────────────────────
-TEST_SIZE      = 0.20           # 80 / 20 train-test split
-VAL_SIZE       = 0.10           # 10% of training set used for validation
-RANDOM_STATE   = 42
-SEQUENCE_LEN   = 20             # Number of consecutive flows fed to the LSTM
-OVERSAMPLE     = True           # Apply SMOTE on training sequences
+TEST_SIZE    = 0.15          # 70 / 15 / 15 train-val-test split
+VAL_SIZE     = 0.15
+RANDOM_STATE = 42
+OVERSAMPLE   = False         # Majority classes capped at 50k in build_dataset.py; SMOTE not used
 
 # ─── Model ────────────────────────────────────────────────────────────────────
-INPUT_SIZE     = len(SELECTED_FEATURES)   # set dynamically in train.py as well
-HIDDEN_SIZE    = 128
-NUM_LAYERS     = 2
-DROPOUT        = 0.3
-BIDIRECTIONAL  = True           # BiLSTM for richer context
+HIDDEN_SIZE = 128
+NUM_LAYERS  = 2
+DROPOUT     = 0.3
 
 # ─── Training ─────────────────────────────────────────────────────────────────
-DEVICE         = "cuda"         # "cuda" or "cpu"  (auto-detected in train.py)
-EPOCHS         = 30
-BATCH_SIZE     = 256
-LEARNING_RATE  = 1e-3
-WEIGHT_DECAY   = 1e-4
-PATIENCE       = 5              # Early-stopping patience (epochs)
-GRAD_CLIP      = 1.0            # Gradient clipping max-norm
-LR_STEP_SIZE   = 10             # StepLR: decay every N epochs
-LR_GAMMA       = 0.5            # StepLR: multiply LR by this factor
+EPOCHS       = 30
+BATCH_SIZE   = 256
+LEARNING_RATE= 1e-3
+PATIENCE     = 5             # Early-stopping patience (epochs without improvement)
 
 # ─── Evaluation ───────────────────────────────────────────────────────────────
-THRESHOLD      = 0.5            # Binary decision threshold (for binary mode)
 SAVE_CONFUSION = True
 SAVE_CURVES    = True
+
+# ─── Live Capture (pyshark) ───────────────────────────────────────────────────
+# Network interface to capture on.  Set to None to auto-detect.
+CAPTURE_INTERFACE = None
+# Number of packets to collect before running one inference pass.
+CAPTURE_BATCH_SIZE = 10

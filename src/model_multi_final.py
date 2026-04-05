@@ -1,6 +1,14 @@
-import pandas as pd
-import numpy as np
+"""
+Train a multiclass LSTM model for DDoS attack detection.
+Run from the repo root:  python src/model_multi_final.py
+"""
+
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import numpy as np
+import pandas as pd
 import joblib
 
 from sklearn.model_selection import train_test_split
@@ -9,123 +17,138 @@ from sklearn.metrics import classification_report, confusion_matrix
 
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 
-# ---------------- LOAD DATA ----------------
+import config
+
+# ─── Load Data ────────────────────────────────────────────────────────────────
 print("Loading dataset...")
-df = pd.read_csv("data/multiclass_dataset.csv")
+if not config.MULTICLASS_DATASET.exists():
+    raise FileNotFoundError(
+        f"Dataset not found: {config.MULTICLASS_DATASET}\n"
+        "Run  python build_dataset.py  first to generate it."
+    )
 
-print("Dataset shape:", df.shape)
+df = pd.read_csv(config.MULTICLASS_DATASET)
+print(f"Dataset shape: {df.shape}")
 
-# ---------------- SPLIT FEATURES & LABEL ----------------
-X = df.drop("Label", axis=1)
-y = df["Label"]
+# ─── Split Features & Label ───────────────────────────────────────────────────
+X = df.drop("Label", axis=1).values
+y = df["Label"].values
 
-# ---------------- TRAIN / VAL / TEST SPLIT ----------------
+# ─── Train / Val / Test Split ─────────────────────────────────────────────────
 X_train, X_temp, y_train, y_temp = train_test_split(
     X, y,
-    test_size=0.3,
+    test_size=config.TEST_SIZE + config.VAL_SIZE,
     stratify=y,
-    random_state=42
+    random_state=config.RANDOM_STATE,
 )
-
+val_fraction = config.VAL_SIZE / (config.TEST_SIZE + config.VAL_SIZE)
 X_val, X_test, y_val, y_test = train_test_split(
     X_temp, y_temp,
-    test_size=0.5,
+    test_size=1.0 - val_fraction,
     stratify=y_temp,
-    random_state=42
+    random_state=config.RANDOM_STATE,
 )
 
-print("Train:", X_train.shape)
-print("Validation:", X_val.shape)
-print("Test:", X_test.shape)
+print(f"Train : {X_train.shape}")
+print(f"Val   : {X_val.shape}")
+print(f"Test  : {X_test.shape}")
 
-# ---------------- SAVE TEST DATASET ----------------
-test_df = pd.DataFrame(X_test, columns=X.columns)
-test_df["Label"] = y_test.values
-
-os.makedirs("data", exist_ok=True)
-test_df.to_csv("data/test_dataset.csv", index=False)
-
-print("Test dataset saved at data/test_dataset.csv")
-
-# ---------------- SCALING ----------------
+# ─── Scaling ──────────────────────────────────────────────────────────────────
 scaler = StandardScaler()
-
 X_train = scaler.fit_transform(X_train)
-X_val = scaler.transform(X_val)
-X_test = scaler.transform(X_test)
+X_val   = scaler.transform(X_val)
+X_test  = scaler.transform(X_test)
 
-# Save scaler
-os.makedirs("model", exist_ok=True)
-joblib.dump(scaler, "model/multiclass_scaler.pkl")
+joblib.dump(scaler, config.SCALER_FILE)
+print(f"Scaler saved to {config.SCALER_FILE}")
 
-# ---------------- RESHAPE FOR LSTM ----------------
+# ─── Save Test Dataset (scaled values + labels) ───────────────────────────────
+feature_cols = df.drop("Label", axis=1).columns.tolist()
+test_df = pd.DataFrame(X_test, columns=feature_cols)
+test_df["Label"] = y_test
+test_df.to_csv(config.TEST_DATASET, index=False)
+print(f"Test dataset saved to {config.TEST_DATASET}")
+
+# ─── Reshape for LSTM  (samples, timesteps=1, features) ──────────────────────
 X_train = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
-X_val = X_val.reshape((X_val.shape[0], 1, X_val.shape[1]))
-X_test = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
+X_val   = X_val.reshape((X_val.shape[0],   1, X_val.shape[1]))
+X_test  = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
 
-# ---------------- NUMBER OF CLASSES ----------------
 num_classes = len(np.unique(y))
-print("Number of classes:", num_classes)
+n_features  = X_train.shape[2]
+print(f"Classes : {num_classes}  |  Features : {n_features}")
 
-# ---------------- BUILD MODEL ----------------
+# ─── Build Model ──────────────────────────────────────────────────────────────
 model = Sequential([
-    LSTM(64, return_sequences=True, input_shape=(1, X_train.shape[2])),
-    Dropout(0.2),
-    LSTM(32),
-    Dropout(0.2),
-    Dense(num_classes, activation='softmax')
+    LSTM(config.HIDDEN_SIZE, return_sequences=True,
+         input_shape=(1, n_features), dropout=config.DROPOUT),
+    LSTM(config.HIDDEN_SIZE // 2, dropout=config.DROPOUT),
+    Dense(64, activation="relu"),
+    Dropout(config.DROPOUT),
+    Dense(num_classes, activation="softmax"),
 ])
 
 model.compile(
-    optimizer='adam',
-    loss='sparse_categorical_crossentropy',
-    metrics=['accuracy']
+    optimizer="adam",
+    loss="sparse_categorical_crossentropy",
+    metrics=["accuracy"],
 )
-
 model.summary()
 
-# ---------------- TRAIN ----------------
-print("Training model...")
+# ─── Callbacks ────────────────────────────────────────────────────────────────
+callbacks = [
+    EarlyStopping(
+        monitor="val_loss",
+        patience=config.PATIENCE,
+        restore_best_weights=True,
+        verbose=1,
+    ),
+    ModelCheckpoint(
+        filepath=str(config.MODEL_FILE),
+        monitor="val_loss",
+        save_best_only=True,
+        verbose=1,
+    ),
+    ReduceLROnPlateau(
+        monitor="val_loss",
+        factor=0.5,
+        patience=3,
+        min_lr=1e-6,
+        verbose=1,
+    ),
+]
 
+# ─── Train ────────────────────────────────────────────────────────────────────
+print("Training model...")
 history = model.fit(
     X_train, y_train,
-    epochs=5,
-    batch_size=512,
-    validation_data=(X_val, y_val)
+    epochs=config.EPOCHS,
+    batch_size=config.BATCH_SIZE,
+    validation_data=(X_val, y_val),
+    callbacks=callbacks,
 )
 
-# ---------------- EVALUATE ----------------
-print("Evaluating model...")
+# ─── Evaluate ─────────────────────────────────────────────────────────────────
+print("\nEvaluating on test set...")
+loss, acc = model.evaluate(X_test, y_test, verbose=0)
+print(f"Test Loss     : {loss:.4f}")
+print(f"Test Accuracy : {acc:.4f}")
 
-loss, acc = model.evaluate(X_test, y_test)
-print("Test Accuracy:", acc)
-
-# ---------------- PREDICTIONS ----------------
 y_pred_probs = model.predict(X_test)
 y_pred = np.argmax(y_pred_probs, axis=1)
 
 print("\nClassification Report:")
 print(classification_report(y_test, y_pred))
 
-# ---------------- CONFUSION MATRIX ----------------
 cm = confusion_matrix(y_test, y_pred)
-
 print("\nConfusion Matrix:")
 print(cm)
 
-# ---------------- CLASS-WISE ACCURACY ----------------
 print("\nClass-wise Accuracy:")
-
 class_accuracy = cm.diagonal() / cm.sum(axis=1)
+for label, ca in zip(np.unique(y_test), class_accuracy):
+    print(f"  Class {label}: {ca:.4f}")
 
-labels = np.unique(y_test)
-
-for label, acc in zip(labels, class_accuracy):
-    print(f"Class {label} Accuracy: {acc:.4f}")
-
-# ---------------- SAVE MODEL ----------------
-model.save("model/multiclass_model.keras")
-
-print("\nModel saved at model/multiclass_model.keras")
-print("Scaler saved at model/multiclass_scaler.pkl")
+print(f"\nModel saved to {config.MODEL_FILE}")
