@@ -64,19 +64,10 @@ X_test  = scaler.transform(X_test)
 joblib.dump(scaler, config.SCALER_FILE)
 print(f"Scaler saved to {config.SCALER_FILE}")
 
-# ─── Save Test Dataset ────────────────────────────────────────────────────────
+# ─── Save Test Dataset (scaled values + labels) ───────────────────────────────
 feature_cols = df.drop("Label", axis=1).columns.tolist()
 test_df = pd.DataFrame(X_test, columns=feature_cols)
 test_df["Label"] = y_test
-# Use raw (unscaled) values so that evaluation scripts can re-scale independently
-raw_test_df = df.iloc[
-    train_test_split(
-        range(len(df)),
-        test_size=config.TEST_SIZE + config.VAL_SIZE,
-        random_state=config.RANDOM_STATE,
-    )[1]
-].reset_index(drop=True)
-# Simpler approach: just save the scaled test set with labels
 test_df.to_csv(config.TEST_DATASET, index=False)
 print(f"Test dataset saved to {config.TEST_DATASET}")
 

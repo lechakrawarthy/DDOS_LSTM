@@ -4,10 +4,11 @@ Real-time DDoS detection using pyshark live packet capture.
 How it works
 ------------
 1. Capture packets from a network interface with pyshark.
-2. Extract per-packet features that approximate CIC-style flow statistics.
-3. Accumulate packets into a small window (config.CAPTURE_BATCH_SIZE).
-4. Scale the feature vector and run one inference pass through the trained LSTM.
-5. Print the prediction for each window.
+2. Extract per-packet features that map to the 75-feature CIC-style vector
+   the trained LSTM model expects.
+3. Accumulate packets into a batch (config.CAPTURE_BATCH_SIZE).
+4. Scale the batch with the saved StandardScaler and run LSTM inference.
+5. Print the prediction (BENIGN / attack type) and confidence per packet.
 
 Requirements
 ------------
@@ -30,16 +31,45 @@ import joblib
 
 import config
 
-# ─── Feature Extraction ───────────────────────────────────────────────────────
-# We extract a simplified feature vector from individual packets.
-# In production these would be computed over complete network flows
-# (like CICFlowMeter does), but live single-packet features are a reasonable
-# approximation for demonstration purposes.
+# ── Exact 75 features the model was trained on (order matters) ────────────────
+LIVE_FEATURES = [
+    "Flow Duration", "Total Fwd Packets", "Total Backward Packets",
+    "Total Length of Fwd Packets", "Total Length of Bwd Packets",
+    "Fwd Packet Length Max", "Fwd Packet Length Min",
+    "Fwd Packet Length Mean", "Fwd Packet Length Std",
+    "Bwd Packet Length Max", "Bwd Packet Length Min",
+    "Bwd Packet Length Mean", "Bwd Packet Length Std",
+    "Flow Bytes/s", "Flow Packets/s",
+    "Flow IAT Mean", "Flow IAT Std", "Flow IAT Max", "Flow IAT Min",
+    "Fwd IAT Total", "Fwd IAT Mean", "Fwd IAT Std", "Fwd IAT Max", "Fwd IAT Min",
+    "Bwd IAT Total", "Bwd IAT Mean", "Bwd IAT Std", "Bwd IAT Max", "Bwd IAT Min",
+    "Fwd PSH Flags", "Fwd URG Flags",
+    "Fwd Header Length", "Bwd Header Length",
+    "Fwd Packets/s", "Bwd Packets/s",
+    "Min Packet Length", "Max Packet Length",
+    "Packet Length Mean", "Packet Length Std", "Packet Length Variance",
+    "FIN Flag Count", "SYN Flag Count", "RST Flag Count",
+    "PSH Flag Count", "ACK Flag Count", "URG Flag Count",
+    "CWE Flag Count", "ECE Flag Count",
+    "Down/Up Ratio", "Average Packet Size",
+    "Avg Fwd Segment Size", "Avg Bwd Segment Size",
+    "Fwd Header Length.1",
+    "Fwd Avg Bytes/Bulk", "Fwd Avg Packets/Bulk", "Fwd Avg Bulk Rate",
+    "Bwd Avg Bytes/Bulk", "Bwd Avg Packets/Bulk", "Bwd Avg Bulk Rate",
+    "Subflow Fwd Packets", "Subflow Fwd Bytes",
+    "Subflow Bwd Packets", "Subflow Bwd Bytes",
+    "Init_Win_bytes_forward", "Init_Win_bytes_backward",
+    "act_data_pkt_fwd", "min_seg_size_forward",
+    "Active Mean", "Active Std", "Active Max", "Active Min",
+    "Idle Mean", "Idle Std", "Idle Max", "Idle Min",
+]
 
-_ZERO_VEC = np.zeros(len(config.SELECTED_FEATURES), dtype=np.float32)
+_N_FEATURES = len(LIVE_FEATURES)
+_FEAT_IDX   = {name: i for i, name in enumerate(LIVE_FEATURES)}
 
 
-def _safe_float(val, default=0.0):
+def _f(val, default=0.0):
+    """Safe float conversion."""
     try:
         return float(val)
     except (TypeError, ValueError):
@@ -48,84 +78,89 @@ def _safe_float(val, default=0.0):
 
 def extract_features(pkt) -> np.ndarray:
     """
-    Map a pyshark packet to a feature vector aligned with config.SELECTED_FEATURES.
+    Map a single pyshark packet to the 75-dim feature vector.
 
-    Many CIC features cannot be computed from a single packet (they require a
-    complete flow), so those positions are filled with 0.  The resulting vector
-    still gives the model usable signal from length, timing, and flag fields.
+    Many CIC flow-level features (IAT statistics, bulk rates, etc.) require a
+    complete bidirectional flow and cannot be computed from one packet alone.
+    Those positions are set to 0.  Fields that ARE accessible per-packet
+    (length, TCP flags, header length, window size) are filled in correctly.
     """
-    vec = _ZERO_VEC.copy()
+    vec = np.zeros(_N_FEATURES, dtype=np.float32)
+    idx = _FEAT_IDX
 
-    feature_names = [f.strip() for f in config.SELECTED_FEATURES]
-    idx = {name: i for i, name in enumerate(feature_names)}
+    pkt_len = _f(getattr(pkt, "length", None))
 
-    # ── Packet length ──────────────────────────────────────────────────────
-    pkt_len = _safe_float(getattr(pkt, "length", None))
-
-    if "Max Packet Length" in idx:
-        vec[idx["Max Packet Length"]] = pkt_len
-    if "Min Packet Length" in idx:
-        vec[idx["Min Packet Length"]] = pkt_len
-    if "Packet Length Mean" in idx:
-        vec[idx["Packet Length Mean"]] = pkt_len
-    if "Average Packet Size" in idx:
-        vec[idx["Average Packet Size"]] = pkt_len
+    # ── Packet length features ─────────────────────────────────────────────
+    for key in ("Min Packet Length", "Max Packet Length",
+                "Packet Length Mean", "Average Packet Size"):
+        if key in idx:
+            vec[idx[key]] = pkt_len
 
     # ── TCP-specific ───────────────────────────────────────────────────────
     if hasattr(pkt, "tcp"):
         tcp = pkt.tcp
-        flags = _safe_float(getattr(tcp, "flags", None))
 
-        # Extract individual TCP flags from the flags integer
-        iflags = int(flags) if flags else 0
-        if "FIN Flag Count" in idx:
-            vec[idx["FIN Flag Count"]] = float(bool(iflags & 0x01))
-        if "SYN Flag Count" in idx:
-            vec[idx["SYN Flag Count"]] = float(bool(iflags & 0x02))
-        if "RST Flag Count" in idx:
-            vec[idx["RST Flag Count"]] = float(bool(iflags & 0x04))
-        if "PSH Flag Count" in idx:
-            vec[idx["PSH Flag Count"]] = float(bool(iflags & 0x08))
-        if "ACK Flag Count" in idx:
-            vec[idx["ACK Flag Count"]] = float(bool(iflags & 0x10))
-        if "URG Flag Count" in idx:
-            vec[idx["URG Flag Count"]] = float(bool(iflags & 0x20))
+        # Flags
+        try:
+            iflags = int(getattr(tcp, "flags", "0x0"), 16)
+        except (ValueError, TypeError):
+            iflags = 0
 
-        hdr_len = _safe_float(getattr(tcp, "hdr_len", None))
-        if "Fwd Header Length" in idx:
-            vec[idx["Fwd Header Length"]] = hdr_len
-        if "Bwd Header Length" in idx:
-            vec[idx["Bwd Header Length"]] = hdr_len
+        flag_map = {
+            "FIN Flag Count": 0x001,
+            "SYN Flag Count": 0x002,
+            "RST Flag Count": 0x004,
+            "PSH Flag Count": 0x008,
+            "ACK Flag Count": 0x010,
+            "URG Flag Count": 0x020,
+            "ECE Flag Count": 0x040,
+            "CWE Flag Count": 0x080,
+            "Fwd PSH Flags":  0x008,
+            "Fwd URG Flags":  0x020,
+        }
+        for fname, mask in flag_map.items():
+            if fname in idx:
+                vec[idx[fname]] = float(bool(iflags & mask))
 
-        win = _safe_float(getattr(tcp, "window_size_value", None))
+        hdr_len = _f(getattr(tcp, "hdr_len", None))
+        for key in ("Fwd Header Length", "Bwd Header Length", "Fwd Header Length.1"):
+            if key in idx:
+                vec[idx[key]] = hdr_len
+
+        win = _f(getattr(tcp, "window_size_value", None))
         if "Init_Win_bytes_forward" in idx:
             vec[idx["Init_Win_bytes_forward"]] = win
 
-        payload_len = _safe_float(getattr(tcp, "len", None))
-        if "Total Length of Fwd Packets" in idx:
-            vec[idx["Total Length of Fwd Packets"]] = payload_len
-        if "Fwd Packet Length Max" in idx:
-            vec[idx["Fwd Packet Length Max"]] = payload_len
-        if "Fwd Packet Length Mean" in idx:
-            vec[idx["Fwd Packet Length Mean"]] = payload_len
+        seg = _f(getattr(tcp, "len", None))
+        if "min_seg_size_forward" in idx:
+            vec[idx["min_seg_size_forward"]] = seg
+
+        payload = _f(getattr(tcp, "len", None))
+        for key in ("Total Length of Fwd Packets", "Fwd Packet Length Max",
+                    "Fwd Packet Length Min", "Fwd Packet Length Mean",
+                    "Avg Fwd Segment Size"):
+            if key in idx:
+                vec[idx[key]] = payload
+
+        if "act_data_pkt_fwd" in idx:
+            vec[idx["act_data_pkt_fwd"]] = 1.0 if payload > 0 else 0.0
 
     # ── UDP-specific ───────────────────────────────────────────────────────
     elif hasattr(pkt, "udp"):
-        udp_len = _safe_float(getattr(pkt.udp, "length", None))
+        udp_len = _f(getattr(pkt.udp, "length", None))
         if "Total Length of Fwd Packets" in idx:
             vec[idx["Total Length of Fwd Packets"]] = udp_len
 
     # ── IP-level ───────────────────────────────────────────────────────────
     if hasattr(pkt, "ip"):
-        ttl = _safe_float(getattr(pkt.ip, "ttl", None))
+        ttl = _f(getattr(pkt.ip, "ttl", None))
         if "Flow Duration" in idx:
-            # Use TTL as a rough flow-duration proxy
             vec[idx["Flow Duration"]] = ttl
 
     return vec
 
 
-# ─── Inference ────────────────────────────────────────────────────────────────
+# ── Inference ─────────────────────────────────────────────────────────────────
 def load_artifacts():
     for path, label in [
         (config.MODEL_FILE,  "Model"),
@@ -137,55 +172,62 @@ def load_artifacts():
                 "Train the model first:  python src/model_multi_final.py"
             )
 
-    from tensorflow.keras.models import load_model as tf_load_model
-    model  = tf_load_model(str(config.MODEL_FILE))
+    from tensorflow.keras.models import load_model as tf_load
+    import warnings
+    warnings.filterwarnings("ignore")
+
+    model  = tf_load(str(config.MODEL_FILE))
     scaler = joblib.load(config.SCALER_FILE)
+
+    # Verify feature count matches
+    if scaler.n_features_in_ != _N_FEATURES:
+        raise ValueError(
+            f"Scaler expects {scaler.n_features_in_} features "
+            f"but live_capture builds {_N_FEATURES}. "
+            "Retrain the model or update LIVE_FEATURES."
+        )
 
     try:
         label_encoder = joblib.load(config.ENCODER_FILE)
         class_names   = label_encoder.classes_.tolist()
     except FileNotFoundError:
-        label_encoder = None
-        class_names   = None
+        class_names = None
 
     return model, scaler, class_names
 
 
 def predict_batch(model, scaler, batch: list, class_names) -> None:
-    """Scale a batch of feature vectors and run one inference pass."""
-    X = np.stack(batch, axis=0)             # (batch, n_features)
-    X = scaler.transform(X)                 # scale
-    X = X.reshape((X.shape[0], 1, X.shape[1]))  # (batch, 1, features)
+    X = np.stack(batch, axis=0)
+    X = scaler.transform(X)
+    X = X.reshape((X.shape[0], 1, X.shape[1]))
 
-    probs  = model.predict(X, verbose=0)    # (batch, n_classes)
+    probs  = model.predict(X, verbose=0)
     labels = np.argmax(probs, axis=1)
 
     for i, (label, prob_row) in enumerate(zip(labels, probs)):
         name       = class_names[label] if class_names else str(label)
         confidence = float(prob_row[label])
-        status     = "ATTACK" if label != 0 else "BENIGN"
-        print(
-            f"  [{i+1:02d}] {status:6s} | class={name:20s} | conf={confidence:.3f}"
-        )
+        status     = "BENIGN" if name == "BENIGN" else "ATTACK"
+        print(f"  [{i+1:02d}] {status:6s} | {name:15s} | conf={confidence:.3f}")
 
 
-# ─── List Interfaces ──────────────────────────────────────────────────────────
+# ── List interfaces ────────────────────────────────────────────────────────────
 def list_interfaces():
     try:
         import pyshark
-        ifaces = pyshark.LiveCapture().interfaces
+        cap = pyshark.LiveCapture()
         print("Available interfaces:")
-        for iface in ifaces:
+        for iface in cap.interfaces:
             print(f"  {iface}")
     except Exception as e:
         print(f"Could not list interfaces: {e}")
 
 
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="Live DDoS detection with pyshark")
     parser.add_argument("--interface", "-i", default=None,
-                        help="Network interface to capture on (default: auto)")
+                        help="Network interface (default: auto)")
     parser.add_argument("--batch", "-b", type=int,
                         default=config.CAPTURE_BATCH_SIZE,
                         help=f"Packets per inference window (default: {config.CAPTURE_BATCH_SIZE})")
@@ -201,9 +243,9 @@ def main():
         import pyshark
     except ImportError:
         print(
-            "ERROR: pyshark is not installed.\n"
-            "       Install it with:  pip install pyshark\n"
-            "       Also ensure Wireshark/tshark is installed and on PATH."
+            "ERROR: pyshark not installed.\n"
+            "       pip install pyshark\n"
+            "       Also install Wireshark and ensure tshark is on PATH."
         )
         sys.exit(1)
 
@@ -211,14 +253,11 @@ def main():
     model, scaler, class_names = load_artifacts()
 
     interface = args.interface or config.CAPTURE_INTERFACE
-    print(f"Starting live capture on interface: {interface or 'auto-detected'}")
-    print(f"Inference window: {args.batch} packet(s)\n")
+    print(f"Capturing on: {interface or 'auto-detected'}")
+    print(f"Batch size  : {args.batch} packets per inference window")
     print("Press Ctrl+C to stop.\n")
 
-    capture = pyshark.LiveCapture(
-        interface=interface,
-        bpf_filter="ip",          # Only capture IPv4 traffic
-    )
+    capture = pyshark.LiveCapture(interface=interface, bpf_filter="ip")
 
     batch = []
     window_count = 0
@@ -239,7 +278,7 @@ def main():
                 batch = []
 
     except KeyboardInterrupt:
-        print("\nCapture stopped by user.")
+        print("\nCapture stopped.")
         if batch:
             print(f"Processing remaining {len(batch)} packet(s):")
             predict_batch(model, scaler, batch, class_names)
